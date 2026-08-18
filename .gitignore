@@ -1,0 +1,21 @@
+# secrets — jangan pernah di-commit
+.env
+.env.local
+*.key
+live-worker.js
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# node / wrangler
+node_modules/
+.wrangler/
+
+# scratch
+*.log
+*.tmp
+*.bak
+*.bak-*
