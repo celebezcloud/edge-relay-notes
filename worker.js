@@ -4,11 +4,77 @@
 // requires for auth (401 unauthorized_client_detected without them).
 //
 // v3 (18 Aug 2026): absorbs upstream 429 (AWS Bedrock ThrottlingException) with
-// bounded retry+backoff. AgentRouter retries 3x internally then returns 429;
-// the throttle window usually clears within a few seconds, so one or two
-// retries here turn a hard failure into a successful response.
+// bounded retry+backoff.
+//
+// v4 (18 Aug 2026): ALSO absorbs transient upstream 5xx — 500 "no available
+// channel" channel flaps and 502/503/504 slow-channel failures — with bounded
+// retry+backoff. The upstream routes each model across several channels; a
+// request that hits a dead/slow channel often succeeds on the next attempt.
+// Does NOT retry deterministic content-guardrail rejections ("sensitive words
+// detected" / content-blocked): identical content trips the same filter on
+// every replay, so retrying only delays the client's failure by MAX_ATTEMPTS.
 const MAX_ATTEMPTS = 3;
-const BACKOFF_MS = [500, 1500]; // sleeps before attempt 2 and 3
+const BACKOFF_MS = [1000, 2000]; // sleeps before attempt 2 and 3
+const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
+// Upstream guardrail signatures — pass through instantly, never retry.
+const NON_RETRYABLE_BODY = /sensitive[\s_]*words?[\s_]*(detected|check)|content[\s_-]*blocked/i;
+
+function cleanHeaders(headers) {
+  const h = new Headers(headers);
+  h.set("Access-Control-Allow-Origin", "*");
+  h.delete("content-encoding");
+  h.delete("content-length");
+  h.delete("transfer-encoding");
+  return h;
+}
+
+// Stream a live upstream response (with the `data: null` SSE filter).
+function passthroughStream(resp, attempt) {
+  const respHeaders = cleanHeaders(resp.headers);
+  respHeaders.set("X-AgentRouter-Retries", String(attempt));
+  const contentType = resp.headers.get("content-type") || "";
+  if (contentType.includes("text/event-stream") && resp.body) {
+    // AgentRouter occasionally emits `data: null`, which the OpenAI SDK
+    // parses as a null chunk and Hermes then dereferences as `choices`.
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+    let pending = "";
+    const filtered = new TransformStream({
+      transform(chunk, controller) {
+        pending += decoder.decode(chunk, { stream: true });
+        const lines = pending.split("\n");
+        pending = lines.pop() || "";
+        for (const line of lines) {
+          if (line.trim() === "data: null") continue;
+          controller.enqueue(encoder.encode(line + "\n"));
+        }
+      },
+      flush(controller) {
+        pending += decoder.decode();
+        if (pending && pending.trim() !== "data: null") {
+          controller.enqueue(encoder.encode(pending));
+        }
+      },
+    });
+    respHeaders.set("content-type", contentType);
+    return new Response(resp.body.pipeThrough(filtered), {
+      status: resp.status,
+      headers: respHeaders,
+    });
+  }
+  return new Response(resp.body, {
+    status: resp.status,
+    headers: respHeaders,
+  });
+}
+
+// Pass through an already-buffered error body (e.g. guardrail 500).
+function passthroughText(text, status, headers, attempt) {
+  const respHeaders = cleanHeaders(headers);
+  respHeaders.set("X-AgentRouter-Retries", String(attempt));
+  respHeaders.set("content-type", headers.get("content-type") || "application/json");
+  return new Response(text, { status, headers: respHeaders });
+}
 
 export default {
   async fetch(request) {
@@ -16,7 +82,7 @@ export default {
 
     // health check for local debugging
     if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response(JSON.stringify({ status: "ok", proxy: "agentrouter", spoof: "v3", retries: MAX_ATTEMPTS - 1 }), {
+      return new Response(JSON.stringify({ status: "ok", proxy: "agentrouter", spoof: "v4", retries: MAX_ATTEMPTS - 1 }), {
         headers: { "Content-Type": "application/json" },
       });
     }
@@ -77,9 +143,18 @@ export default {
         });
       }
 
-      // Absorb transient 429s (rate limit). Respect Retry-After when present,
-      // clamped so we never exceed the Workers wall-clock budget.
-      if (resp.status === 429 && attempt < MAX_ATTEMPTS - 1) {
+      // Transient statuses worth retrying (429 rate limit, 5xx channel flap /
+      // slow channel). Skip on the final attempt — pass through as-is.
+      if (RETRYABLE_STATUS.has(resp.status) && attempt < MAX_ATTEMPTS - 1) {
+        // Deterministic guardrail rejections must pass through immediately:
+        // the same content trips the same filter every time, so a retry is a
+        // guaranteed second failure that only delays the client.
+        if (resp.status === 500) {
+          const text = await resp.text();
+          if (NON_RETRYABLE_BODY.test(text)) {
+            return passthroughText(text, resp.status, resp.headers, attempt);
+          }
+        }
         const retryAfter = parseFloat(resp.headers.get("retry-after") || "");
         let delay = BACKOFF_MS[attempt] || 1500;
         if (!Number.isNaN(retryAfter) && retryAfter > 0) {
@@ -89,47 +164,8 @@ export default {
         continue;
       }
 
-      // Not retryable — pass through (including final 429 after attempts).
-      const respHeaders = new Headers(resp.headers);
-      respHeaders.set("Access-Control-Allow-Origin", "*");
-      respHeaders.set("X-AgentRouter-Retries", String(attempt));
-      respHeaders.delete("content-encoding");
-      respHeaders.delete("content-length");
-      respHeaders.delete("transfer-encoding");
-      const contentType = resp.headers.get("content-type") || "";
-      if (contentType.includes("text/event-stream") && resp.body) {
-        // AgentRouter occasionally emits `data: null`, which the OpenAI SDK
-        // parses as a null chunk and Hermes then dereferences as `choices`.
-        const decoder = new TextDecoder();
-        const encoder = new TextEncoder();
-        let pending = "";
-        const filtered = new TransformStream({
-          transform(chunk, controller) {
-            pending += decoder.decode(chunk, { stream: true });
-            const lines = pending.split("\n");
-            pending = lines.pop() || "";
-            for (const line of lines) {
-              if (line.trim() === "data: null") continue;
-              controller.enqueue(encoder.encode(line + "\n"));
-            }
-          },
-          flush(controller) {
-            pending += decoder.decode();
-            if (pending && pending.trim() !== "data: null") {
-              controller.enqueue(encoder.encode(pending));
-            }
-          },
-        });
-        respHeaders.set("content-type", contentType);
-        return new Response(resp.body.pipeThrough(filtered), {
-          status: resp.status,
-          headers: respHeaders,
-        });
-      }
-      return new Response(resp.body, {
-        status: resp.status,
-        headers: respHeaders,
-      });
+      // Not retryable / final attempt — pass through.
+      return passthroughStream(resp, attempt);
     }
   },
 };

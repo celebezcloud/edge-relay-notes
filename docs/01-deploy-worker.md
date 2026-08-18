@@ -47,9 +47,9 @@ curl -X POST \
 ## Verifikasi
 
 ```bash
-# 1. Health check — worker v3 punya retry 429 (spoof: "v3")
+# 1. Health check — worker v4 menyerap 429 + 5xx transient (spoof: "v4")
 curl https://my-relay.<subdomain>.workers.dev/health
-# → {"status":"ok","proxy":"agentrouter","spoof":"v3","retries":2}
+# → {"status":"ok","proxy":"agentrouter","spoof":"v4","retries":2}
 
 # 2. End-to-end + streaming (test yang benar-benar penting)
 python3 scripts/verify.py
@@ -68,9 +68,10 @@ curl "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/scrip
 
 Respons berupa envelope multipart — buang baris header/boundary di awal dan akhir untuk mendapat JS bersih.
 
-## Catatan worker (v3)
+## Catatan worker (v4)
 
-- **Retry 429**: worker menyerap `429 ThrottlingException` (AWS Bedrock rate limit) dengan maksimal 3 attempt + backoff (500ms/1500ms, hormati `Retry-After` dibatasi 3s). Respons diteruskan dengan header `X-AgentRouter-Retries`. Detail: `03-troubleshooting.md` §0.
+- **Retry transient**: worker menyerap `429` (AWS Bedrock rate limit), `500` (channel flap `无可用渠道`), `502/503`, dan `504` (origin lambat) dengan maksimal 3 attempt + backoff (1s/2s, hormati `Retry-After` dibatasi 3s). Body di-buffer supaya POST bisa dikirim ulang; respons diteruskan dengan header `X-AgentRouter-Retries`.
+- **Guardrail konten TIDAK di-retry**: `500 sensitive words detected` / `content-blocked` bersifat deterministik (konten sama → filter sama), jadi relay langsung meneruskannya tanpa buang waktu retry. Detail: `03-troubleshooting.md` §4.
 - **Tidak ada filter konten di worker** — murni relay. Semua blokir konten (`sensitive words detected`, `content-blocked`) datang dari backend `agentrouter.org`.
 - Header yang di-spoof: `User-Agent: claude-cli/2.1.92`, `Anthropic-Version`, `Anthropic-Beta`, `Anthropic-Dangerous-Direct-Browser-Access`, `X-App`, `X-Stainless-*`.
 - Worker menghapus `cf-connecting-ip`, `cf-ray`, `x-forwarded-for`, `x-real-ip` dll. agar IP client tidak bocor ke origin.

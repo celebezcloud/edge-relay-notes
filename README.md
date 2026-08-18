@@ -27,12 +27,13 @@ Tiga masalah yang semuanya diselesaikan di satu Worker:
 | 2 | `401 unauthorized_client_detected` | Backend hanya melayani request yang terlihat seperti Claude Code CLI | Injeksi `User-Agent: claude-cli/*` + `Anthropic-*` + `X-Stainless-*` |
 | 3 | Streaming crash (`'NoneType' has no attribute 'choices'`) | Backend kadang mengirim baris `data: null` di SSE | Filter baris `data: null` dari stream |
 | 4 | `429 ThrottlingException` (kadang) | AWS Bedrock upstream rate-limit untuk model Claude | Retry + backoff (≤2 retry, hormati `Retry-After`, dibatasi 3s) |
+| 5 | `500 no-channel` / `504 origin timeout` (kadang) | Channel upstream mati sesaat / origin lambat melewati batas 100s Cloudflare | Retry 5xx transient (v4) — kecuali guardrail konten (`sensitive words`), yang deterministik & langsung diteruskan |
 
 ## Isi Repo
 
 | File | Fungsi |
 |---|---|
-| `worker.js` | Source Worker relay (persis yang live, 100 baris) |
+| `worker.js` | Source Worker relay (persis yang live) |
 | `scripts/deploy.py` | Deploy Worker via REST API tanpa wrangler (kredensial dari env) |
 | `scripts/verify.py` | Verifikasi end-to-end pakai OpenAI SDK + **streaming** |
 | `docs/01-deploy-worker.md` | Cara deploy Worker ke Cloudflare (Dashboard & API) |

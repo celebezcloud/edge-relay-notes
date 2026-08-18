@@ -14,7 +14,7 @@ Terlihat di chat (model `claude-opus-*`), di log gateway sebagai `openai.RateLim
 
 **Sebab**: model Claude di backend `agentrouter.org` dipasok lewat **AWS Bedrock**. Ketika kuota Bedrock akun mereka habis sesaat (burst request, model lain ikut kena), Bedrock membalas `429 ThrottlingException`. `exceeded maximum number of attempts, 3` berarti **AgentRouter sendiri sudah retry 3× secara internal** lalu menyerah dan meneruskan 429 ke client. Bukan masalah key, config, atau relay.
 
-**Apa yang sudah dilakukan relay (worker v3)**: menyerap 429 dengan retry + backoff (`MAX_ATTEMPTS=3`, delay 500ms/1500ms, hormati header `Retry-After` dibatasi 3s). Throttle Bedrock biasanya bersih dalam beberapa detik, jadi retry di relay sering mengubah kegagalan menjadi sukses. Kalau masih gagal setelah 3 attempt, 429 diteruskan apa adanya.
+**Apa yang sudah dilakukan relay (worker v4)**: menyerap 429 dengan retry + backoff (`MAX_ATTEMPTS=3`, delay 1s/2s, hormati header `Retry-After` dibatasi 3s). Throttle Bedrock biasanya bersih dalam beberapa detik, jadi retry di relay sering mengubah kegagalan menjadi sukses. Sejak v4, `500` (channel flap `无可用渠道`), `502/503`, dan `504` (origin lambat) juga ikut di-retry — request yang gagal di satu channel sering sukses di channel lain. Kalau masih gagal setelah 3 attempt, error diteruskan apa adanya.
 
 **Cara cek siapa yang kena**:
 ```bash
@@ -137,10 +137,11 @@ curl "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/scrip
 
 **Gejala**: pesan umum Hermes ketika provider gagal 3× berturut-turut.
 
-**Solusi**: cek log gateway untuk error spesifiknya — hampir selalu salah satu kasus #1–#5:
+**Solusi**: cek log gateway untuk error spesifiknya — hampir selalu salah satu kasus #0–#5:
 ```bash
 journalctl --user -u hermes-gateway.service -n 200 --no-pager | grep -iE "agentrouter|arproxy|HTTP (4|5)[0-9][0-9]"
 ```
+Sejak worker v4, `429`/`500`/`502/503`/`504` sudah di-retry otomatis di relay (biasanya sukses di percobaan berikutnya). Error yang tetap lolos ke Hermes: guardrail konten (`sensitive words detected` — lihat §4) dan kegagalan yang bertahan >3 attempt berturut-turut.
 
 ## 7. `/v1/v1/messages` — double `/v1`
 
