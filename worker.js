@@ -13,6 +13,13 @@
 // Does NOT retry deterministic content-guardrail rejections ("sensitive words
 // detected" / content-blocked): identical content trips the same filter on
 // every replay, so retrying only delays the client's failure by MAX_ATTEMPTS.
+//
+// v5 (18 Aug 2026): single-tenant auth gate. The relay now only serves the
+// configured AgentRouter key: requests whose `Authorization` header does not
+// match the `ALLOWED_KEY` worker secret get 401 right here and the upstream
+// is never called. Anyone who finds this URL or copies this repo still needs
+// the real key to use the relay. If the secret is unset the relay stays open
+// (legacy behavior) — set it via deploy.py for a locked-down relay.
 const MAX_ATTEMPTS = 3;
 const BACKOFF_MS = [1000, 2000]; // sleeps before attempt 2 and 3
 const RETRYABLE_STATUS = new Set([429, 500, 502, 503, 504]);
@@ -77,14 +84,28 @@ function passthroughText(text, status, headers, attempt) {
 }
 
 export default {
-  async fetch(request) {
+  async fetch(request, env) {
     const url = new URL(request.url);
 
-    // health check for local debugging
+    // health check for local debugging (open, no auth)
     if (url.pathname === "/" || url.pathname === "/health") {
-      return new Response(JSON.stringify({ status: "ok", proxy: "agentrouter", spoof: "v4", retries: MAX_ATTEMPTS - 1 }), {
+      return new Response(JSON.stringify({ status: "ok", proxy: "agentrouter", spoof: "v5", retries: MAX_ATTEMPTS - 1 }), {
         headers: { "Content-Type": "application/json" },
       });
+    }
+
+    // --- Single-tenant auth gate -------------------------------------------
+    // Only the configured AgentRouter key may pass through. Copied repos or
+    // leaked URLs get 401 here and the upstream is never contacted. When the
+    // ALLOWED_KEY secret is unset the relay stays open (legacy behavior).
+    if (env.ALLOWED_KEY) {
+      const auth = request.headers.get("authorization") || "";
+      if (auth !== `Bearer ${env.ALLOWED_KEY}`) {
+        return new Response(
+          JSON.stringify({ error: { message: "invalid relay key", type: "relay_auth_error" } }),
+          { status: 401, headers: { "Content-Type": "application/json" } },
+        );
+      }
     }
 
     const targetUrl = "https://agentrouter.org" + url.pathname + url.search;

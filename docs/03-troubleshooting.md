@@ -143,6 +143,19 @@ journalctl --user -u hermes-gateway.service -n 200 --no-pager | grep -iE "agentr
 ```
 Sejak worker v4, `429`/`500`/`502/503`/`504` sudah di-retry otomatis di relay (biasanya sukses di percobaan berikutnya). Error yang tetap lolos ke Hermes: guardrail konten (`sensitive words detected` — lihat §4) dan kegagalan yang bertahan >3 attempt berturut-turut.
 
+## 6b. `401 relay_auth_error` — key tidak cocok dengan secret relay
+
+**Gejala**: semua request ditolak `401 {"error":{"message":"invalid relay key","type":"relay_auth_error"}}`, padahal key benar.
+
+**Sebab**: worker v5 membandingkan `Authorization` dengan secret `ALLOWED_KEY`. Key Hermes berubah/berganti (mis. regenerasi di agentrouter.org) tapi secret belum di-update.
+
+**Solusi**: redeploy dengan `RELAY_ALLOWED_KEY` baru (meng-update secret):
+```bash
+export RELAY_ALLOWED_KEY="sk-key-baru"
+python3 scripts/deploy.py
+```
+Kalau key tidak mau di-set sebagai secret, pakai worker v4 (tanpa gate) atau jangan set `RELAY_ALLOWED_KEY`.
+
 ## 7. `/v1/v1/messages` — double `/v1`
 
 **Gejala**: 404 / path aneh di log.

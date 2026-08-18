@@ -47,9 +47,9 @@ curl -X POST \
 ## Verifikasi
 
 ```bash
-# 1. Health check — worker v4 menyerap 429 + 5xx transient (spoof: "v4")
+# 1. Health check — worker v5: retry 5xx + auth gate (spoof: "v5")
 curl https://my-relay.<subdomain>.workers.dev/health
-# → {"status":"ok","proxy":"agentrouter","spoof":"v4","retries":2}
+# → {"status":"ok","proxy":"agentrouter","spoof":"v5","retries":2}
 
 # 2. End-to-end + streaming (test yang benar-benar penting)
 python3 scripts/verify.py
@@ -68,8 +68,9 @@ curl "https://api.cloudflare.com/client/v4/accounts/$CF_ACCOUNT_ID/workers/scrip
 
 Respons berupa envelope multipart — buang baris header/boundary di awal dan akhir untuk mendapat JS bersih.
 
-## Catatan worker (v4)
+## Catatan worker (v5)
 
+- **Auth gate (v5)**: saat deploy dengan `RELAY_ALLOWED_KEY` di-set, worker hanya melayani `Authorization: Bearer <key>` yang cocok (disimpan sebagai secret `ALLOWED_KEY`). Request lain → `401 relay_auth_error` tanpa memanggil upstream. Ini mengunci relay: URL yang bocor atau repo yang di-copy tidak berguna tanpa key. Tanpa secret, relay tetap terbuka (legacy).
 - **Retry transient**: worker menyerap `429` (AWS Bedrock rate limit), `500` (channel flap `无可用渠道`), `502/503`, dan `504` (origin lambat) dengan maksimal 3 attempt + backoff (1s/2s, hormati `Retry-After` dibatasi 3s). Body di-buffer supaya POST bisa dikirim ulang; respons diteruskan dengan header `X-AgentRouter-Retries`.
 - **Guardrail konten TIDAK di-retry**: `500 sensitive words detected` / `content-blocked` bersifat deterministik (konten sama → filter sama), jadi relay langsung meneruskannya tanpa buang waktu retry. Detail: `03-troubleshooting.md` §4.
 - **Tidak ada filter konten di worker** — murni relay. Semua blokir konten (`sensitive words detected`, `content-blocked`) datang dari backend `agentrouter.org`.

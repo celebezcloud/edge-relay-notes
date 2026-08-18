@@ -28,6 +28,7 @@ Tiga masalah yang semuanya diselesaikan di satu Worker:
 | 3 | Streaming crash (`'NoneType' has no attribute 'choices'`) | Backend kadang mengirim baris `data: null` di SSE | Filter baris `data: null` dari stream |
 | 4 | `429 ThrottlingException` (kadang) | AWS Bedrock upstream rate-limit untuk model Claude | Retry + backoff (≤2 retry, hormati `Retry-After`, dibatasi 3s) |
 | 5 | `500 no-channel` / `504 origin timeout` (kadang) | Channel upstream mati sesaat / origin lambat melewati batas 100s Cloudflare | Retry 5xx transient (v4) — kecuali guardrail konten (`sensitive words`), yang deterministik & langsung diteruskan |
+| 6 | Relay dipakai orang lain (URL bocor / repo di-copy) | Worker terbuka tanpa pembeda pengguna | **Auth gate v5**: hanya key yang terdaftar (`ALLOWED_KEY` secret) yang dilayani — selainnya 401 tanpa menyentuh upstream |
 
 ## Isi Repo
 

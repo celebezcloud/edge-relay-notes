@@ -11,6 +11,8 @@ Credentials are read from environment variables — never hardcode them here.
 Optional:
     WORKER_NAME   default: my-relay   (ganti dengan nama Worker-mu)
     WORKER_PATH   default: ../worker.js relative to this script
+    RELAY_ALLOWED_KEY  AgentRouter key yang diizinkan pakai relay ini (worker v5
+                       auth gate). Kosongkan untuk relay terbuka (legacy).
 """
 import json
 import os
@@ -67,8 +69,37 @@ try:
         },
         indent=2,
     ))
-    sys.exit(0 if data.get("success") else 1)
+    if not data.get("success"):
+        sys.exit(1)
 except urllib.error.HTTPError as exc:
     print("HTTP ERROR", exc.code)
     print(exc.read().decode(errors="replace")[:800])
     sys.exit(1)
+
+# --- Optional: single-tenant auth gate (worker v5) -------------------------
+# Set RELAY_ALLOWED_KEY to the AgentRouter key that may use this relay. The
+# worker then rejects every other Authorization header with 401 before ever
+# contacting the upstream — a copied repo / leaked URL is useless without it.
+# Skip this to keep the relay open (legacy behavior).
+RELAY_KEY = os.environ.get("RELAY_ALLOWED_KEY", "").strip()
+if RELAY_KEY:
+    secret_url = f"https://api.cloudflare.com/client/v4/accounts/{ACCT}/workers/scripts/{SCRIPT_NAME}/secrets"
+    sreq = urllib.request.Request(
+        secret_url,
+        data=json.dumps({"name": "ALLOWED_KEY", "text": RELAY_KEY, "type": "secret_text"}).encode(),
+        method="PUT",
+    )
+    sreq.add_header("X-Auth-Email", EMAIL)
+    sreq.add_header("X-Auth-Key", KEY)
+    sreq.add_header("Content-Type", "application/json")
+    try:
+        sresp = urllib.request.urlopen(sreq, timeout=60)
+        sdata = json.loads(sresp.read())
+        print("SECRET ALLOWED_KEY:", "ok" if sdata.get("success") else json.dumps(sdata.get("errors")))
+        sys.exit(0 if sdata.get("success") else 1)
+    except urllib.error.HTTPError as exc:
+        print("SECRET HTTP ERROR", exc.code)
+        print(exc.read().decode(errors="replace")[:500])
+        sys.exit(1)
+else:
+    print("SECRET ALLOWED_KEY: skipped (relay stays open)")
